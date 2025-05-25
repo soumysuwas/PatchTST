@@ -1,1 +1,515 @@
+# Rainfall Forecasting using PatchTST
+#
+# This script consolidates preprocessing, model definition, training,
+# prediction, and evaluation for rainfall forecasting using the PatchTST model.
+#
+# Necessary pip installations:
+# pip install torch pandas numpy matplotlib scikit-learn
 
+# 1. Import Statements
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+import torch.nn.functional as F # Added from patchtst_model
+import pandas as pd
+import numpy as np
+import os
+import math # Added from patchtst_model
+from typing import Optional # Added from patchtst_model
+import matplotlib.pyplot as plt # Added from evaluate
+from sklearn.metrics import mean_absolute_error, mean_squared_error # Added from evaluate
+
+# 2. Code Sections
+
+# ==Preprocessing Code (from preprocessing.py)==
+def read_and_combine_data(file_path_template, start_year=2014, end_year=2024):
+    """
+    Reads and combines data from multiple CSV files.
+
+    Args:
+        file_path_template (str): A string template for the file paths, 
+                                  e.g., "data/{year}ProcessedMeanRainfallGriddedData5000m.csv"
+        start_year (int): The starting year.
+        end_year (int): The ending year.
+
+    Returns:
+        pandas.DataFrame: A DataFrame containing the combined data, or None if an error occurs.
+    """
+    all_data = []
+    for year in range(start_year, end_year + 1):
+        file_path = file_path_template.format(year=year)
+        try:
+            df = pd.read_csv(file_path)
+            # Keep only relevant columns
+            df = df[['system:index', 'Date', 'Rainfall']]
+            all_data.append(df)
+        except FileNotFoundError:
+            print(f"Error: File not found at {file_path}. Please check the file path and try again.")
+            return None
+        except Exception as e:
+            print(f"An error occurred while reading {file_path}: {e}")
+            return None
+    
+    if not all_data:
+        print("No data files were found or loaded.")
+        return None
+        
+    combined_df = pd.concat(all_data, ignore_index=True)
+    return combined_df
+
+def parse_system_index(df):
+    """
+    Parses the 'system:index' column to create 'Grid_ID' and 'Day_of_Year' columns.
+
+    Args:
+        df (pandas.DataFrame): The input DataFrame with a 'system:index' column.
+
+    Returns:
+        pandas.DataFrame: The DataFrame with added 'Grid_ID' and 'Day_of_Year' columns.
+    """
+    if 'system:index' not in df.columns:
+        print("Error: 'system:index' column not found in DataFrame.")
+        return df
+
+    split_data = df['system:index'].str.split('_', expand=True)
+    if split_data.shape[1] == 2:
+        df['Grid_ID'] = split_data[0].astype(int)
+        df['Day_of_Year'] = split_data[1].astype(int)
+    else:
+        print("Error: 'system:index' column is not in the expected 'GridID_DayOfYear' format.")
+    return df
+
+def convert_date_column(df):
+    """
+    Converts the 'Date' column to datetime objects.
+
+    Args:
+        df (pandas.DataFrame): The input DataFrame with a 'Date' column.
+
+    Returns:
+        pandas.DataFrame: The DataFrame with the 'Date' column converted to datetime objects.
+    """
+    if 'Date' not in df.columns:
+        print("Error: 'Date' column not found in DataFrame.")
+        return df
+        
+    try:
+        df['Date'] = pd.to_datetime(df['Date'], format='%d-%m-%Y')
+    except Exception as e:
+        print(f"Error converting 'Date' column to datetime: {e}")
+    return df
+
+def pivot_data(df):
+    """
+    Pivots the data to have 'Date' as index, 'Grid_ID' as columns, and 'Rainfall' as values.
+
+    Args:
+        df (pandas.DataFrame): The input DataFrame with 'Date', 'Grid_ID', and 'Rainfall' columns.
+
+    Returns:
+        pandas.DataFrame: The pivoted DataFrame, or None if an error occurs.
+    """
+    required_columns = ['Date', 'Grid_ID', 'Rainfall']
+    if not all(col in df.columns for col in required_columns):
+        print(f"Error: DataFrame must contain the following columns for pivoting: {', '.join(required_columns)}")
+        return None
+
+    try:
+        # Ensure Grid_ID is string type for pivoting to avoid issues with numeric column names
+        # if not pd.api.types.is_string_dtype(df['Grid_ID']):
+        #      df['Grid_ID'] = df['Grid_ID'].astype(str)
+        pivot_df = df.pivot(index='Date', columns='Grid_ID', values='Rainfall')
+    except Exception as e:
+        print(f"Error pivoting data: {e}")
+        return None
+    return pivot_df
+
+def split_data(df):
+    """
+    Splits the data into training (2014-2023) and testing (2024) sets.
+
+    Args:
+        df (pandas.DataFrame): The pivoted DataFrame with a datetime index.
+
+    Returns:
+        tuple: A tuple containing the training DataFrame and the testing DataFrame.
+               Returns (None, None) if an error occurs or if the DataFrame is empty.
+    """
+    if df is None or df.empty:
+        print("Error: Input DataFrame is empty or None. Cannot split data.")
+        return None, None
+
+    if not isinstance(df.index, pd.DatetimeIndex):
+        print("Error: DataFrame index must be a DatetimeIndex for splitting.")
+        return None, None
+
+    try:
+        train_start_date = '2014-01-01'
+        train_end_date = '2023-12-31'
+        test_start_date = '2024-01-01'
+        test_end_date = '2024-12-31'
+
+        train_mask = (df.index >= train_start_date) & (df.index <= train_end_date)
+        test_mask = (df.index >= test_start_date) & (df.index <= test_end_date)
+        
+        train_df = df[train_mask]
+        test_df = df[test_mask]
+
+        if train_df.empty:
+            print("Warning: Training data is empty after splitting. Check date ranges and input data.")
+        if test_df.empty:
+            print("Warning: Testing data is empty after splitting. Check date ranges and input data.")
+            
+    except Exception as e:
+        print(f"Error splitting data: {e}")
+        return None, None
+        
+    return train_df, test_df
+
+# ==PatchTST Model Code (from patchtst_model.py)==
+class Patching(nn.Module):
+    """
+    Divides input time series into patches.
+    """
+    def __init__(self, patch_len: int, stride: int):
+        super().__init__()
+        self.patch_len = patch_len
+        self.stride = stride
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size, n_vars, seq_len = x.shape
+        num_patches = (seq_len - self.patch_len) // self.stride + 1
+        patches = x.unfold(2, self.patch_len, self.stride)
+        return patches
+
+class PatchEmbedding(nn.Module):
+    """
+    Embeds patches using a linear layer.
+    """
+    def __init__(self, patch_len: int, d_model: int):
+        super().__init__()
+        self.projection = nn.Linear(patch_len, d_model)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.projection(x)
+        return x
+
+class PositionalEncoding(nn.Module):
+    """
+    Adds sinusoidal positional encoding to patch embeddings.
+    """
+    def __init__(self, d_model: int, max_len: int = 5000):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0).unsqueeze(0) 
+        self.register_buffer('pe', pe)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.pe[:, :, :x.size(2), :] 
+        return x
+
+class LearnedPositionalEncoding(nn.Module):
+    """
+    Adds learned positional encoding to patch embeddings.
+    """
+    def __init__(self, d_model: int, max_len: int = 5000):
+        super().__init__()
+        self.pe = nn.Parameter(torch.randn(1, 1, max_len, d_model))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.pe[:, :, :x.size(2), :]
+        return x
+
+class PatchTST(nn.Module):
+    """
+    Patch Time Series Transformer model.
+    """
+    def __init__(self, c_in: int, seq_len: int, forecast_horizon: int, 
+                 patch_len: int, stride: int, d_model: int, n_heads: int, 
+                 n_encoder_layers: int, d_ff: int, dropout: float = 0.1, 
+                 attn_dropout: float = 0.0, use_learned_pe: bool = True,
+                 norm_first: bool = True):
+        super().__init__()
+        self.c_in = c_in
+        self.seq_len = seq_len
+        self.forecast_horizon = forecast_horizon
+        self.patch_len = patch_len
+        self.stride = stride
+        self.d_model = d_model
+
+        self.patching = Patching(patch_len, stride)
+        self.num_patches = (seq_len - patch_len) // stride + 1
+        self.embedding = PatchEmbedding(patch_len, d_model)
+
+        if use_learned_pe:
+            self.pos_encoder = LearnedPositionalEncoding(d_model, max_len=self.num_patches)
+        else:
+            self.pos_encoder = PositionalEncoding(d_model, max_len=self.num_patches)
+        
+        self.embed_dropout = nn.Dropout(dropout)
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model, nhead=n_heads, dim_feedforward=d_ff, 
+            dropout=attn_dropout, activation=F.gelu, batch_first=True, norm_first=norm_first
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer=encoder_layer, num_layers=n_encoder_layers,
+            norm=nn.LayerNorm(d_model) if norm_first else None
+        )
+        
+        self.head_flatten = nn.Flatten(start_dim=2)
+        self.head_linear = nn.Linear(self.num_patches * d_model, forecast_horizon)
+        self.head_dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size, n_vars, seq_len = x.shape
+        x_patched = self.patching(x)
+        x_embedded = self.embedding(x_patched)
+        x_pos_encoded = self.pos_encoder(x_embedded)
+        x_pos_encoded = self.embed_dropout(x_pos_encoded)
+        
+        x_transformed = x_pos_encoded.reshape(batch_size * n_vars, self.num_patches, self.d_model)
+        x_transformed = self.transformer_encoder(x_transformed)
+        
+        x_transformed = self.head_dropout(x_transformed)
+        x_transformed_flat = self.head_flatten(x_transformed)
+        y_pred = self.head_linear(x_transformed_flat)
+        y_pred = y_pred.reshape(batch_size, n_vars, self.forecast_horizon)
+        return y_pred
+
+# ==Evaluation Code (from evaluate.py)==
+def calculate_metrics(y_true, y_pred):
+    """
+    Calculates Mean Absolute Error (MAE) and Root Mean Squared Error (RMSE).
+    """
+    if isinstance(y_true, torch.Tensor):
+        y_true = y_true.cpu().numpy()
+    if isinstance(y_pred, torch.Tensor):
+        y_pred = y_pred.cpu().numpy()
+
+    y_true_flat = y_true.flatten()
+    y_pred_flat = y_pred.flatten()
+    
+    valid_indices = ~np.isnan(y_true_flat) & ~np.isnan(y_pred_flat)
+    y_true_clean = y_true_flat[valid_indices]
+    y_pred_clean = y_pred_flat[valid_indices]
+
+    if len(y_true_clean) == 0 or len(y_pred_clean) == 0:
+        return {'mae': np.nan, 'rmse': np.nan}
+        
+    if y_true_clean.shape != y_pred_clean.shape:
+        min_len = min(len(y_true_clean), len(y_pred_clean))
+        y_true_clean = y_true_clean[:min_len]
+        y_pred_clean = y_pred_clean[:min_len]
+
+    mae = mean_absolute_error(y_true_clean, y_pred_clean)
+    rmse = np.sqrt(mean_squared_error(y_true_clean, y_pred_clean))
+    return {'mae': mae, 'rmse': rmse}
+
+def plot_forecast(y_true, y_pred, grid_id, forecast_horizon, save_dir="plots"):
+    """
+    Generates and saves a line plot comparing actual vs. predicted rainfall.
+    """
+    if isinstance(y_true, torch.Tensor):
+        y_true = y_true.cpu().numpy()
+    if isinstance(y_pred, torch.Tensor):
+        y_pred = y_pred.cpu().numpy()
+    
+    y_true = y_true.squeeze().flatten()
+    y_pred = y_pred.squeeze().flatten()
+
+    min_len = min(len(y_true), len(y_pred), forecast_horizon)
+    y_true = y_true[:min_len]
+    y_pred = y_pred[:min_len]
+    time_steps = np.arange(1, min_len + 1)
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(time_steps, y_true, label='Actual Rainfall', marker='.', linestyle='-')
+    plt.plot(time_steps, y_pred, label='Predicted Rainfall', marker='x', linestyle='--')
+    
+    plt.title(f"Rainfall Forecast vs Actual for Grid {grid_id}")
+    plt.xlabel(f"Time Step into Horizon (Days 1-{len(time_steps)})")
+    plt.ylabel("Rainfall")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    plot_filename = os.path.join(save_dir, f"forecast_plot_grid_{grid_id}.png")
+    try:
+        plt.savefig(plot_filename)
+        print(f"Plot saved to {plot_filename}")
+    except Exception as e:
+        print(f"Error saving plot: {e}")
+    plt.close()
+
+# ==Core Training and Prediction Logic (adapted from train_predict.py)==
+def create_sequences(data, history_len, forecast_horizon):
+    """
+    Creates sequences from time series data.
+    """
+    X, y = [], []
+    for i in range(len(data) - history_len - forecast_horizon + 1):
+        X.append(data[i:(i + history_len)])
+        y.append(data[(i + history_len):(i + history_len + forecast_horizon)])
+    return np.array(X), np.array(y)
+
+# 4. Main Execution Block
+if __name__ == "__main__":
+    # User Configuration
+    DATA_DIRECTORY = "data/" # User needs to place CSVs here
+    FILE_PATH_TEMPLATE = os.path.join(DATA_DIRECTORY, "{year}ProcessedMeanRainfallGriddedData5000m.csv")
+    
+    HISTORY_LEN = 104 
+    FORECAST_HORIZON = 365 
+    PATCH_LEN = 16
+    STRIDE = 8
+    D_MODEL = 128
+    N_HEADS = 8
+    N_LAYERS = 3 # Corresponds to n_encoder_layers in PatchTST
+    D_FF = 256
+    DROPOUT = 0.1
+    ATTN_DROPOUT = 0.0
+    LEARNING_RATE = 1e-3
+    NUM_EPOCHS = 10 # Keep low for initial testing
+    BATCH_SIZE = 32
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    RUN_FOR_SINGLE_GRID = True # Set to False to run for all grids
+
+    print(f"Using device: {DEVICE}")
+    print(f"Data will be read from: {os.path.abspath(DATA_DIRECTORY)}")
+    print("Please ensure your CSV files (e.g., 2014ProcessedMeanRainfallGriddedData5000m.csv) are in this directory.")
+
+    # Data Loading & Preprocessing
+    print("\nLoading and preprocessing data...")
+    if not os.path.exists(DATA_DIRECTORY):
+        print(f"Error: Data directory '{DATA_DIRECTORY}' not found. Please create it and place your CSV files there.")
+        exit()
+        
+    combined_data = read_and_combine_data(FILE_PATH_TEMPLATE, start_year=2014, end_year=2024)
+    if combined_data is None:
+        print("Failed to load data. Exiting.")
+        exit()
+
+    combined_data = parse_system_index(combined_data)
+    combined_data = convert_date_column(combined_data)
+    pivot_df = pivot_data(combined_data)
+
+    if pivot_df is None:
+        print("Pivoting data failed. Exiting.")
+        exit()
+        
+    train_df_all_grids, test_df_all_grids = split_data(pivot_df)
+    if train_df_all_grids is None or test_df_all_grids is None:
+        print("Data splitting failed. Exiting.")
+        exit()
+
+    all_grid_metrics = []
+    
+    grid_ids_to_process = train_df_all_grids.columns
+    if RUN_FOR_SINGLE_GRID:
+        if not grid_ids_to_process.empty:
+            grid_ids_to_process = [grid_ids_to_process[0]]
+            print(f"\nRUNNING FOR SINGLE GRID: {grid_ids_to_process[0]}")
+        else:
+            print("No grids found in the data. Exiting.")
+            exit()
+
+    for grid_id in grid_ids_to_process:
+        print(f"\n--- Processing Grid_ID: {grid_id} ---")
+        
+        train_data_single_grid = train_df_all_grids[grid_id].values
+        test_data_single_grid = test_df_all_grids[grid_id].values
+
+        train_data_single_grid = np.nan_to_num(train_data_single_grid, nan=0.0)
+        test_data_single_grid = np.nan_to_num(test_data_single_grid, nan=0.0)
+
+        print("Preparing data for the model...")
+        X_train, y_train = create_sequences(train_data_single_grid, HISTORY_LEN, FORECAST_HORIZON)
+        X_test, y_test = create_sequences(test_data_single_grid, HISTORY_LEN, FORECAST_HORIZON)
+
+        if X_train.shape[0] == 0 or X_test.shape[0] == 0:
+            print(f"Not enough data for Grid_ID {grid_id} to create sequences. Skipping.")
+            continue
+
+        X_train_tensor = torch.tensor(X_train, dtype=torch.float32).unsqueeze(1).to(DEVICE)
+        y_train_tensor = torch.tensor(y_train, dtype=torch.float32).unsqueeze(1).to(DEVICE)
+        X_test_tensor = torch.tensor(X_test, dtype=torch.float32).unsqueeze(1).to(DEVICE)
+        y_test_tensor = torch.tensor(y_test, dtype=torch.float32).unsqueeze(1).to(DEVICE)
+
+        train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
+        test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
+        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+        test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+
+        print("Instantiating model, loss, and optimizer...")
+        model = PatchTST(
+            c_in=1, seq_len=HISTORY_LEN, forecast_horizon=FORECAST_HORIZON,
+            patch_len=PATCH_LEN, stride=STRIDE, d_model=D_MODEL, n_heads=N_HEADS,
+            n_encoder_layers=N_LAYERS, d_ff=D_FF, dropout=DROPOUT, attn_dropout=ATTN_DROPOUT
+        ).to(DEVICE)
+
+        criterion = nn.MSELoss()
+        optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+
+        print("Starting training loop...")
+        for epoch in range(NUM_EPOCHS):
+            model.train()
+            epoch_loss = 0
+            for batch_X, batch_y in train_loader:
+                optimizer.zero_grad()
+                predictions = model(batch_X)
+                loss = criterion(predictions, batch_y)
+                loss.backward()
+                optimizer.step()
+                epoch_loss += loss.item()
+            avg_epoch_loss = epoch_loss / len(train_loader)
+            print(f"Grid {grid_id} - Epoch [{epoch+1}/{NUM_EPOCHS}], Training Loss: {avg_epoch_loss:.4f}")
+
+        print("Generating predictions...")
+        model.eval()
+        all_predictions_grid = []
+        all_actuals_grid = []
+        with torch.no_grad():
+            for batch_X, batch_y in test_loader:
+                predictions = model(batch_X)
+                all_predictions_grid.append(predictions.cpu().numpy())
+                all_actuals_grid.append(batch_y.cpu().numpy())
+        
+        if not all_predictions_grid:
+            print(f"No predictions generated for Grid_ID {grid_id}. Skipping evaluation and plotting.")
+            continue
+
+        all_predictions_grid = np.concatenate(all_predictions_grid, axis=0)
+        all_actuals_grid = np.concatenate(all_actuals_grid, axis=0)
+
+        print(f"Predictions shape for Grid {grid_id}: {all_predictions_grid.shape}")
+        print(f"Actuals shape for Grid {grid_id}: {all_actuals_grid.shape}")
+
+        metrics = calculate_metrics(all_actuals_grid, all_predictions_grid)
+        print(f"Grid {grid_id} - Test Metrics: MAE={metrics['mae']:.4f}, RMSE={metrics['rmse']:.4f}")
+        all_grid_metrics.append({'grid_id': grid_id, **metrics})
+
+        # Plotting for the first sample of the test set for the current grid
+        if all_actuals_grid.shape[0] > 0:
+             plot_forecast(all_actuals_grid[0, 0, :], all_predictions_grid[0, 0, :], grid_id, FORECAST_HORIZON)
+        else:
+            print(f"Not enough data to plot for Grid_ID {grid_id}.")
+
+
+    if all_grid_metrics:
+        avg_mae = np.mean([m['mae'] for m in all_grid_metrics if not np.isnan(m['mae'])])
+        avg_rmse = np.mean([m['rmse'] for m in all_grid_metrics if not np.isnan(m['rmse'])])
+        print(f"\n--- Overall Summary ---")
+        print(f"Average MAE across all processed grids: {avg_mae:.4f}")
+        print(f"Average RMSE across all processed grids: {avg_rmse:.4f}")
+    else:
+        print("\nNo grids were processed, or no metrics were calculated.")
+
+    print("\nScript finished.")
