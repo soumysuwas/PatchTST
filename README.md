@@ -86,3 +86,6 @@ next the column named 'Rainfall' has the value of rainfall in mm for that day
 these are 3 main and relevant columns : 'system:index', 'Date', 'Rainfall'
  
 i want to write a code that can predict/forecast rainfall with least errors, get inspiration and ideas and code architecture as said above , and write the code for me , also also when doing so , make it so that the code works both on GPU and CPU if available , also include any installs for dependecy for pip, the code i going to be run primarily on the kaggle or colab, i want to have the grid by grid prediction, and for checking if evything is working correctly only do prediction for one grid, give me code , thanks
+
+
+please create and write the code and add it here in the file : [Code.txt](Code.txt)
