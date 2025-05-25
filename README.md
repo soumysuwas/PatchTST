@@ -30,27 +30,49 @@ So now like i need to create a new code
  the structure is like this: 
  
  RangeIndex: 32485 entries, 0 to 32484
+ 
 Data columns (total 10 columns):
- #   Column        Non-Null Count  Dtype  
+
+ #   Column        Non-Null Count  Dtype 
+ 
 ---  ------        --------------  -----  
- 0   system:index  32485 non-null  object 
+
+ 0   system:index  32485 non-null  object
+ 
  1   Date          32485 non-null  object 
+ 
  2   Latitude      32485 non-null  float64
+ 
  3   Left_Lon      32485 non-null  float64
+ 
  4   Longitude     32485 non-null  float64
+ 
  5   Lower_Lat     32485 non-null  float64
+ 
  6   Rainfall      32485 non-null  float64
+ 
  7   Right_Lon     32485 non-null  float64
+ 
  8   Upper_Lat     32485 non-null  float64
+ 
  9   .geo          32485 non-null  object 
+
 dtypes: float64(7), object(3)
+
 memory usage: 2.5+ MB
+
 None
+
 system:index	Date	Latitude	Left_Lon	Longitude	Lower_Lat	Rainfall	Right_Lon	Upper_Lat	.geo
+
 0	0_0	01-01-2014	11.473421	76.121721	76.144179	11.450963	0.000000	76.166637	11.495878	{"geodesic":false,"type":"Point","coordinates"...
+
 1	0_1	02-01-2014	11.473421	76.121721	76.144179	11.450963	0.000000	76.166637	11.495878	{"geodesic":false,"type":"Point","coordinates"...
+
 2	0_2	03-01-2014	11.473421	76.121721	76.144179	11.450963	0.207457	76.166637	11.495878	{"geodesic":false,"type":"Point","coordinates"...
+
 3	0_3	04-01-2014	11.473421	76.121721	76.144179	11.450963	3.398571	76.166637	11.495878	{"geodesic":false,"type":"Point","coordinates"...
+
 4	0_4	05-01-2014	11.473421	76.121721	76.144179	11.450963	3.087930	76.166637	11.495878	{"geodesic":false,"type":"Point","coordinates"...
 
 where in the column named 'system:index' we have the reference for the Grid number and day number , the values are like this: 0_0, 0_1, .....,0_364/365 ,1_0, 1_1, .....1_364/365, ......88_364              
