@@ -79,7 +79,7 @@ where in the column named 'system:index' we have the reference for the Grid numb
 
 here the values are representing the grid number and day number such that the value before '_' is the grid number and the value after is day number , for example in 1_5 the 1 is the grid number and the 5 is the day number reperesenting the 5th day of the year, the value of grid number goes from 0 to 88 totalling to 89 grids and the value for day number goes from 0 to 364 or 365 depending on whether it is leap year or not representing the days of the years.
 
-next the column named 'Date' has the date in the format DD-MM-YYYY for each corresponding system:index 
+next the column named 'Date' has the date in the format DD/MM/YY for each corresponding system:index 
 
 next the column named 'Rainfall' has the value of rainfall in mm for that day
 
