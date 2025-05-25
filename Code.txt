@@ -95,7 +95,7 @@ def convert_date_column(df):
         return df
         
     try:
-        df['Date'] = pd.to_datetime(df['Date'], format='%d-%m-%Y')
+        df['Date'] = pd.to_datetime(df['Date'], format='%d/%m/%y') # Changed date format
     except Exception as e:
         print(f"Error converting 'Date' column to datetime: {e}")
     return df
@@ -116,9 +116,6 @@ def pivot_data(df):
         return None
 
     try:
-        # Ensure Grid_ID is string type for pivoting to avoid issues with numeric column names
-        # if not pd.api.types.is_string_dtype(df['Grid_ID']):
-        #      df['Grid_ID'] = df['Grid_ID'].astype(str)
         pivot_df = df.pivot(index='Date', columns='Grid_ID', values='Rainfall')
     except Exception as e:
         print(f"Error pivoting data: {e}")
@@ -199,17 +196,23 @@ class PositionalEncoding(nn.Module):
     """
     Adds sinusoidal positional encoding to patch embeddings.
     """
-    def __init__(self, d_model: int, max_len: int = 5000):
+    def __init__(self, d_model: int, max_len: int = 5000): # max_len is max_num_patches
         super().__init__()
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).unsqueeze(0) 
+        pe = pe.unsqueeze(0).unsqueeze(0) # Shape: [1, 1, max_len, d_model]
         self.register_buffer('pe', pe)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor of shape [batch_size, n_vars, num_patches, d_model]
+        Returns:
+            Tensor with added positional encoding, shape [batch_size, n_vars, num_patches, d_model]
+        """
         x = x + self.pe[:, :, :x.size(2), :] 
         return x
 
@@ -217,13 +220,20 @@ class LearnedPositionalEncoding(nn.Module):
     """
     Adds learned positional encoding to patch embeddings.
     """
-    def __init__(self, d_model: int, max_len: int = 5000):
+    def __init__(self, d_model: int, max_len: int = 5000): # max_len is max_num_patches
         super().__init__()
-        self.pe = nn.Parameter(torch.randn(1, 1, max_len, d_model))
+        self.pe = nn.Parameter(torch.randn(1, 1, max_len, d_model)) # learnable
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor of shape [batch_size, n_vars, num_patches, d_model]
+        Returns:
+            Tensor with added positional encoding, shape [batch_size, n_vars, num_patches, d_model]
+        """
         x = x + self.pe[:, :, :x.size(2), :]
         return x
+
 
 class PatchTST(nn.Module):
     """
@@ -300,12 +310,14 @@ def calculate_metrics(y_true, y_pred):
     y_pred_clean = y_pred_flat[valid_indices]
 
     if len(y_true_clean) == 0 or len(y_pred_clean) == 0:
+        print("Warning: No valid (non-NaN) data points found for metric calculation.")
         return {'mae': np.nan, 'rmse': np.nan}
         
     if y_true_clean.shape != y_pred_clean.shape:
         min_len = min(len(y_true_clean), len(y_pred_clean))
         y_true_clean = y_true_clean[:min_len]
         y_pred_clean = y_pred_clean[:min_len]
+        print(f"Warning: y_true and y_pred have different shapes after NaN removal/flattening. Metrics calculated on common length {min_len}.")
 
     mae = mean_absolute_error(y_true_clean, y_pred_clean)
     rmse = np.sqrt(mean_squared_error(y_true_clean, y_pred_clean))
@@ -341,6 +353,8 @@ def plot_forecast(y_true, y_pred, grid_id, forecast_horizon, save_dir="plots"):
 
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
+        print(f"Created directory: {save_dir}")
+
     plot_filename = os.path.join(save_dir, f"forecast_plot_grid_{grid_id}.png")
     try:
         plt.savefig(plot_filename)
@@ -405,48 +419,66 @@ if __name__ == "__main__":
         print("Pivoting data failed. Exiting.")
         exit()
         
-    train_df_all_grids, test_df_all_grids = split_data(pivot_df)
-    if train_df_all_grids is None or test_df_all_grids is None:
+    train_df, test_df = split_data(pivot_df) 
+    if train_df is None or test_df is None:
         print("Data splitting failed. Exiting.")
         exit()
-
-    all_grid_metrics = []
     
-    grid_ids_to_process = train_df_all_grids.columns
+    all_grid_metrics = {} 
+    
+    grid_ids_to_process = train_df.columns 
     if RUN_FOR_SINGLE_GRID:
         if not grid_ids_to_process.empty:
-            grid_ids_to_process = [grid_ids_to_process[0]]
+            grid_ids_to_process = [grid_ids_to_process[0]] 
             print(f"\nRUNNING FOR SINGLE GRID: {grid_ids_to_process[0]}")
         else:
             print("No grids found in the data. Exiting.")
             exit()
 
-    for grid_id in grid_ids_to_process:
-        print(f"\n--- Processing Grid_ID: {grid_id} ---")
+    for current_grid_id in grid_ids_to_process: 
+        print(f"\n--- Processing Grid_ID: {current_grid_id} ---")
         
-        train_data_single_grid = train_df_all_grids[grid_id].values
-        test_data_single_grid = test_df_all_grids[grid_id].values
+        train_data_single_grid_series = train_df[current_grid_id] 
+        test_data_single_grid_series = test_df[current_grid_id]   
 
-        train_data_single_grid = np.nan_to_num(train_data_single_grid, nan=0.0)
-        test_data_single_grid = np.nan_to_num(test_data_single_grid, nan=0.0)
+        if train_data_single_grid_series.shape[0] < (HISTORY_LEN + FORECAST_HORIZON):
+            print(f"Not enough data for Grid_ID {current_grid_id} for training sequences. Required: {HISTORY_LEN + FORECAST_HORIZON}, Available: {train_data_single_grid_series.shape[0]}. Skipping training for this grid.")
+            all_grid_metrics[current_grid_id] = {'mae': float('nan'), 'rmse': float('nan'), 'trained_epochs': 0, 'status': 'No train data'}
+            continue
+
+        train_data_single_grid = np.nan_to_num(train_data_single_grid_series.values, nan=0.0)
+        test_data_single_grid = np.nan_to_num(test_data_single_grid_series.values, nan=0.0)
 
         print("Preparing data for the model...")
         X_train, y_train = create_sequences(train_data_single_grid, HISTORY_LEN, FORECAST_HORIZON)
-        X_test, y_test = create_sequences(test_data_single_grid, HISTORY_LEN, FORECAST_HORIZON)
-
-        if X_train.shape[0] == 0 or X_test.shape[0] == 0:
-            print(f"Not enough data for Grid_ID {grid_id} to create sequences. Skipping.")
+        
+        if X_train.shape[0] == 0: 
+            print(f"Still no training sequences created for Grid_ID {current_grid_id} after create_sequences. Skipping.")
+            all_grid_metrics[current_grid_id] = {'mae': float('nan'), 'rmse': float('nan'), 'trained_epochs': 0, 'status': 'Train sequence creation failed'}
             continue
+            
+        if test_data_single_grid_series.shape[0] < (HISTORY_LEN + FORECAST_HORIZON):
+            print(f"Not enough data for Grid_ID {current_grid_id} for test sequences. Required: {HISTORY_LEN + FORECAST_HORIZON}, Available: {test_data_single_grid_series.shape[0]}. Training will proceed, but testing/evaluation for this grid will be skipped.")
+            X_test, y_test = np.array([]), np.array([]) 
+        else:
+            X_test, y_test = create_sequences(test_data_single_grid, HISTORY_LEN, FORECAST_HORIZON)
+            if X_test.shape[0] == 0:
+                 print(f"No test sequences created for Grid_ID {current_grid_id} despite initial check. Skipping prediction for this grid.")
+                 all_grid_metrics[current_grid_id] = {'mae': float('nan'), 'rmse': float('nan'), 'trained_epochs': NUM_EPOCHS, 'status': 'Test sequence creation failed'}
 
         X_train_tensor = torch.tensor(X_train, dtype=torch.float32).unsqueeze(1).to(DEVICE)
         y_train_tensor = torch.tensor(y_train, dtype=torch.float32).unsqueeze(1).to(DEVICE)
-        X_test_tensor = torch.tensor(X_test, dtype=torch.float32).unsqueeze(1).to(DEVICE)
-        y_test_tensor = torch.tensor(y_test, dtype=torch.float32).unsqueeze(1).to(DEVICE)
-
+        
         train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
-        test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
         train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-        test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+
+        if X_test.shape[0] > 0:
+            X_test_tensor = torch.tensor(X_test, dtype=torch.float32).unsqueeze(1).to(DEVICE)
+            y_test_tensor = torch.tensor(y_test, dtype=torch.float32).unsqueeze(1).to(DEVICE)
+            test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
+            test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+        else:
+            test_loader = None 
 
         print("Instantiating model, loss, and optimizer...")
         model = PatchTST(
@@ -470,46 +502,58 @@ if __name__ == "__main__":
                 optimizer.step()
                 epoch_loss += loss.item()
             avg_epoch_loss = epoch_loss / len(train_loader)
-            print(f"Grid {grid_id} - Epoch [{epoch+1}/{NUM_EPOCHS}], Training Loss: {avg_epoch_loss:.4f}")
+            print(f"Grid {current_grid_id} - Epoch [{epoch+1}/{NUM_EPOCHS}], Training Loss: {avg_epoch_loss:.4f}")
 
-        print("Generating predictions...")
-        model.eval()
-        all_predictions_grid = []
-        all_actuals_grid = []
-        with torch.no_grad():
-            for batch_X, batch_y in test_loader:
-                predictions = model(batch_X)
-                all_predictions_grid.append(predictions.cpu().numpy())
-                all_actuals_grid.append(batch_y.cpu().numpy())
+        if test_loader is not None : 
+            print("Generating predictions...")
+            model.eval()
+            all_predictions_grid = []
+            all_actuals_grid = []
+            with torch.no_grad():
+                for batch_X, batch_y in test_loader:
+                    predictions = model(batch_X)
+                    all_predictions_grid.append(predictions.cpu().numpy())
+                    all_actuals_grid.append(batch_y.cpu().numpy())
         
-        if not all_predictions_grid:
-            print(f"No predictions generated for Grid_ID {grid_id}. Skipping evaluation and plotting.")
-            continue
+            if not all_predictions_grid:
+                print(f"No predictions generated for Grid_ID {current_grid_id}. Skipping evaluation and plotting.")
+                all_grid_metrics[current_grid_id] = {'mae': float('nan'), 'rmse': float('nan'), 'trained_epochs': NUM_EPOCHS, 'status': 'No predictions'}
+                continue
 
-        all_predictions_grid = np.concatenate(all_predictions_grid, axis=0)
-        all_actuals_grid = np.concatenate(all_actuals_grid, axis=0)
+            all_predictions_grid = np.concatenate(all_predictions_grid, axis=0)
+            all_actuals_grid = np.concatenate(all_actuals_grid, axis=0)
 
-        print(f"Predictions shape for Grid {grid_id}: {all_predictions_grid.shape}")
-        print(f"Actuals shape for Grid {grid_id}: {all_actuals_grid.shape}")
+            print(f"Predictions shape for Grid {current_grid_id}: {all_predictions_grid.shape}")
+            print(f"Actuals shape for Grid {current_grid_id}: {all_actuals_grid.shape}")
 
-        metrics = calculate_metrics(all_actuals_grid, all_predictions_grid)
-        print(f"Grid {grid_id} - Test Metrics: MAE={metrics['mae']:.4f}, RMSE={metrics['rmse']:.4f}")
-        all_grid_metrics.append({'grid_id': grid_id, **metrics})
+            metrics = calculate_metrics(all_actuals_grid, all_predictions_grid)
+            print(f"Grid {current_grid_id} - Test Metrics: MAE={metrics['mae']:.4f}, RMSE={metrics['rmse']:.4f}")
+            all_grid_metrics[current_grid_id] = {'mae': metrics['mae'], 'rmse': metrics['rmse'], 'trained_epochs': NUM_EPOCHS, 'status': 'Success'}
 
-        # Plotting for the first sample of the test set for the current grid
-        if all_actuals_grid.shape[0] > 0:
-             plot_forecast(all_actuals_grid[0, 0, :], all_predictions_grid[0, 0, :], grid_id, FORECAST_HORIZON)
+
+            if all_actuals_grid.shape[0] > 0:
+                 plot_forecast(all_actuals_grid[0, 0, :], all_predictions_grid[0, 0, :], current_grid_id, FORECAST_HORIZON)
+            else:
+                print(f"Not enough data to plot for Grid_ID {current_grid_id}.")
         else:
-            print(f"Not enough data to plot for Grid_ID {grid_id}.")
+            print(f"No test data available for Grid_ID {current_grid_id}. Evaluation and plotting skipped.")
+            all_grid_metrics[current_grid_id] = {'mae': float('nan'), 'rmse': float('nan'), 'trained_epochs': NUM_EPOCHS, 'status': 'No test data'}
 
 
     if all_grid_metrics:
-        avg_mae = np.mean([m['mae'] for m in all_grid_metrics if not np.isnan(m['mae'])])
-        avg_rmse = np.mean([m['rmse'] for m in all_grid_metrics if not np.isnan(m['rmse'])])
+        valid_maes = [m['mae'] for m in all_grid_metrics.values() if 'mae' in m and not np.isnan(m['mae'])]
+        valid_rmses = [m['rmse'] for m in all_grid_metrics.values() if 'rmse' in m and not np.isnan(m['rmse'])]
+        avg_mae = np.mean(valid_maes) if valid_maes else float('nan')
+        avg_rmse = np.mean(valid_rmses) if valid_rmses else float('nan')
         print(f"\n--- Overall Summary ---")
-        print(f"Average MAE across all processed grids: {avg_mae:.4f}")
-        print(f"Average RMSE across all processed grids: {avg_rmse:.4f}")
+        print(f"Average MAE across all processed grids with valid metrics: {avg_mae:.4f}")
+        print(f"Average RMSE across all processed grids with valid metrics: {avg_rmse:.4f}")
+        print("\n--- Status per Grid ---")
+        for grid_id_summary, summary_metrics in all_grid_metrics.items():
+            print(f"Grid {grid_id_summary}: Status={summary_metrics['status']}, MAE={summary_metrics.get('mae', float('nan')):.4f}, RMSE={summary_metrics.get('rmse', float('nan')):.4f}, Epochs={summary_metrics.get('trained_epochs', 0)}") 
     else:
         print("\nNo grids were processed, or no metrics were calculated.")
 
     print("\nScript finished.")
+
+[end of Code.txt]
